@@ -1,0 +1,300 @@
+const assert = require('node:assert/strict')
+const { readFileSync } = require('node:fs')
+const path = require('node:path')
+const { test } = require('node:test')
+const vm = require('node:vm')
+const { transformSync } = require('esbuild')
+
+// Execute the real page handlers with hook and fetch doubles. No server or DB is contacted.
+const shoe = { id: 'shoe-1', name: 'کفش آدیداس', slug: 'adidas-ultra', description: 'Lightweight trail runner', price: 100000, images: [], stock: 5, sizes: [42], colors: ['سبز'], featured: false, categoryId: 'cat-1', category: { name: 'کتانی' } }
+const category = { id: 'cat-1', name: 'کتانی', slug: 'sneaker', image: null, _count: { products: 0 } }
+const user = { id: 'user-1', name: 'مشتری نمونه', email: 'customer@example.test', phone: null, role: 'USER', _count: { orders: 1 } }
+const order = (overrides = {}) => ({ id: 'order-pending', total: 150000, shippingMethodName: 'پست پیشتاز', shippingCost: 50000, status: 'PENDING', verified: false, recipientName: 'گیرنده نمونه', address: 'نشانی نمونه', phone: '09123456789', createdAt: '2026-10-01T08:00:00Z', user: { name: user.name, email: user.email }, items: [{ id: 'line-1', quantity: 1, size: 42, color: 'سبز', price: 100000, product: { name: shoe.name } }], ...overrides })
+const settle = () => new Promise(setImmediate)
+const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => data })
+
+function page(file = 'src/app/(shop)/products/page.tsx', { queues = {}, search = '' } = {}) {
+  const slots = [], pendingEffects = [], requests = [], confirmations = []
+  let cursor = 0, tree, stateWrites = 0
+  const same = (left, right) => left && left.length === right.length && left.every((value, index) => Object.is(value, right[index]))
+  const react = {
+    Suspense: 'Suspense',
+    Fragment: 'Fragment',
+    useState(initial) {
+      const index = cursor++
+      if (!(index in slots)) slots[index] = { value: typeof initial === 'function' ? initial() : initial }
+      return [slots[index].value, (next) => { stateWrites++; slots[index].value = typeof next === 'function' ? next(slots[index].value) : next }]
+    },
+    useMemo(callback) { cursor++; return callback() },
+    useCallback(callback, dependencies) {
+      const index = cursor++
+      if (!slots[index] || !same(slots[index].dependencies, dependencies)) slots[index] = { callback, dependencies }
+      return slots[index].callback
+    },
+    useEffect(callback, dependencies) {
+      const index = cursor++
+      if (!slots[index] || !same(slots[index].dependencies, dependencies)) {
+        slots[index]?.cleanup?.()
+        slots[index] = { dependencies }
+        pendingEffects.push(() => { slots[index].cleanup = callback() })
+      }
+    },
+  }
+  const location = { pathname: '/products', search, hash: '' }
+  const window = {
+    location,
+    history: { replaceState(_state, _title, value) { const url = new URL(value, 'http://localhost'); location.search = url.search } },
+  }
+  const defaults = { '/api/products': [shoe], '/api/categories': [category], '/api/users': [user], '/api/orders': [order()] }
+  const fetch = async (url, options = {}) => {
+    const key = `${options.method || 'GET'} ${url}`
+    requests.push({ url, ...options })
+    const queue = queues[key] || queues[url]
+    const value = queue?.length ? queue.shift() : response(defaults[url] || {})
+    if (value instanceof Error) throw value
+    if (typeof value === 'function') return value(options)
+    return value
+  }
+  const jsx = (type, props) => typeof type === 'function' ? type(props) : ({ type, props })
+  const css = { __esModule: true, default: new Proxy({}, { get: (_, name) => name }) }
+  const dependencies = {
+    react, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
+    'next/link': { __esModule: true, default: 'Link' },
+    'next/navigation': { useSearchParams: () => new URLSearchParams(location.search) },
+    'lucide-react': new Proxy({}, { get: (_, name) => name }),
+    '@/components/ui/BrandIcons': { SneakerIcon: 'SneakerIcon' },
+    '@/components/shop/ProductCard': { __esModule: true, default: 'ProductCard' },
+    '@/components/admin/MultiImageInput': { __esModule: true, default: 'MultiImageInput' },
+    '@/lib/utils': { formatPrice: (value) => String(value) },
+    '@/components/shop/commerce.module.css': css,
+    '@/components/admin/admin.module.css': css,
+  }
+  const source = readFileSync(path.join(__dirname, '..', file), 'utf8')
+  const { code } = transformSync(source, { loader: 'tsx', format: 'cjs', target: 'es2022', jsx: 'automatic' })
+  const context = {
+    module: { exports: {} }, AbortController, Error, TypeError, URLSearchParams, fetch, window,
+    confirm: (message) => { confirmations.push(message); return true },
+    require(name) { assert.ok(name in dependencies, `Unexpected dependency ${name}`); return dependencies[name] },
+  }
+  vm.runInNewContext(code, context)
+  function render() {
+    cursor = 0
+    tree = context.module.exports.default()
+    pendingEffects.splice(0).forEach((effect) => effect())
+    return tree
+  }
+  render()
+  return {
+    render, requests, confirmations, location,
+    get tree() { return tree }, get stateWrites() { return stateWrites },
+    unmount() { for (const slot of slots) slot?.cleanup?.() },
+  }
+}
+
+function nodes(tree) {
+  if (Array.isArray(tree)) return tree.flatMap(nodes)
+  if (!tree || typeof tree !== 'object' || !tree.props) return []
+  return [tree, ...nodes(tree.props.children)]
+}
+function text(tree) {
+  if (Array.isArray(tree)) return tree.map(text).join('')
+  if (tree && typeof tree === 'object') return text(tree.props?.children)
+  return tree === undefined || tree === null || typeof tree === 'boolean' ? '' : String(tree)
+}
+const find = (app, predicate) => nodes(app.tree).find(predicate)
+const retry = (app) => find(app, (node) => node.type === 'button' && text(node) === 'تلاش دوباره')
+const cards = (app) => nodes(app.tree).filter((node) => node.type === 'ProductCard')
+
+for (const search of ['کفش', 'ADIDAS-ULTRA', ' TRAIL ', 'lightweight']) {
+  test(`Listing search includes names, slugs and descriptions with trimmed case-insensitive terms: ${search}`, async () => {
+    const app = page(undefined, { search: `?q=${encodeURIComponent(search)}` })
+    await settle(); app.render()
+    assert.equal(cards(app).length, 1)
+    assert.equal(cards(app)[0].props.product.id, shoe.id)
+    app.unmount()
+  })
+}
+
+for (const [label, failure] of [
+  ['network failure', new TypeError('Failed to fetch')],
+  ['HTTP failure', response({ error: 'سرور در دسترس نیست' }, 503)],
+  ['invalid JSON data', response({ unexpected: true })],
+]) {
+  test(`Listing ${label} displays an error and retries while preserving URL filters`, async () => {
+    const app = page(undefined, { search: '?q=TRAIL&stock=1', queues: { '/api/products': [failure, response([shoe])] } })
+    await settle(); app.render()
+    assert.match(text(app.tree), /ویترین فعلاً در دسترس نیست/)
+    assert.ok(find(app, (node) => node.props.role === 'alert'))
+    assert.ok(!text(app.tree).includes('هنوز محصولی ثبت نشده است'))
+    assert.equal(cards(app).length, 0)
+    retry(app).props.onClick(); app.render()
+    await settle(); app.render()
+    assert.equal(cards(app).length, 1)
+    assert.equal(app.location.search, '?q=TRAIL&stock=1')
+    app.unmount()
+  })
+}
+
+test('Category failure is visible instead of pretending the store has no products', async () => {
+  const app = page(undefined, { queues: { '/api/categories': [response({ error: 'دسته‌بندی‌ها دریافت نشدند' }, 500)] } })
+  await settle(); app.render()
+  assert.match(text(app.tree), /دسته‌بندی‌ها دریافت نشدند/)
+  assert.equal(cards(app).length, 0)
+  assert.ok(retry(app))
+  app.unmount()
+})
+
+for (const file of ['src/app/(shop)/products/page.tsx', 'src/app/admin/products/page.tsx', 'src/app/admin/categories/page.tsx', 'src/app/admin/users/page.tsx']) {
+  test(`${file} aborts pending loading and ignores late responses after unmount`, async () => {
+    const endpoint = file.includes('categories') ? '/api/categories' : file.includes('users') ? '/api/users' : '/api/products'
+    let finish
+    const delayed = new Promise((resolve) => { finish = resolve })
+    const app = page(file, { queues: { [endpoint]: [() => delayed] } })
+    const writes = app.stateWrites
+    app.unmount()
+    assert.ok(app.requests.every((request) => request.signal.aborted))
+    finish(response(endpoint === '/api/users' ? [user] : endpoint === '/api/categories' ? [category] : [shoe]))
+    await settle()
+    assert.equal(app.stateWrites, writes)
+  })
+}
+
+for (const [file, endpoint, deletion, title] of [
+  ['src/app/admin/products/page.tsx', '/api/products', '/api/products/shoe-1', 'حذف'],
+  ['src/app/admin/categories/page.tsx', '/api/categories', '/api/categories/cat-1', 'حذف'],
+  ['src/app/admin/users/page.tsx', '/api/users', '/api/users/user-1', 'حذف کاربر'],
+]) {
+  test(`${file} retries failed loading and exposes protected-history delete errors without removing the row`, async () => {
+    const app = page(file, { queues: {
+      [endpoint]: [new TypeError('Failed to fetch')],
+      [`DELETE ${deletion}`]: [response({ error: 'سابقه سفارش باید حفظ شود' }, 409)],
+    } })
+    await settle(); app.render()
+    assert.ok(retry(app))
+    retry(app).props.onClick(); app.render()
+    await settle(); app.render()
+    const button = find(app, (node) => node.type === 'button' && node.props.title === title)
+    assert.ok(button)
+    await button.props.onClick(); app.render()
+    assert.match(text(app.tree), /سابقه سفارش باید حفظ شود/)
+    assert.ok(find(app, (node) => node.type === 'button' && node.props.title === title))
+    if (file.includes('users')) {
+      assert.match(app.confirmations[0], /سابقهٔ سفارش قابل حذف نیستند/)
+      assert.ok(!app.confirmations[0].includes('سفارشهای او هم حذف'))
+    }
+    app.unmount()
+  })
+}
+
+const ordersFile = 'src/app/admin/orders/page.tsx'
+const orderStatus = (app, id) => find(app, (node) => node.type === 'select' && node.props['aria-label'] === `وضعیت سفارش ${id.slice(-6)}`)
+const orderDelete = (app, id) => find(app, (node) => node.type === 'button' && node.props['aria-label'] === `حذف سفارش ${id.slice(-6)}`)
+const statusOptions = (select) => nodes(select).filter((node) => node.type === 'option').map((node) => node.props.value)
+
+test('Admin orders preserves paid or fulfilled history by disabling its delete controls', async () => {
+  const rows = [
+    order({ id: 'order-paid01', verified: true }),
+    order({ id: 'order-ship02', status: 'SHIPPED' }),
+    order({ id: 'order-deli03', status: 'DELIVERED' }),
+    order({ id: 'order-canc04', status: 'CANCELLED', verified: true }),
+    order({ id: 'order-open05' }),
+  ]
+  const app = page(ordersFile, { queues: { '/api/orders': [response(rows)] } })
+  await settle(); app.render()
+  for (const row of rows.slice(0, -1)) {
+    const button = orderDelete(app, row.id)
+    assert.equal(button.props.disabled, true)
+    assert.match(button.props.title, /سابقهٔ سفارش.*حفظ می‌شود/)
+  }
+  assert.equal(orderDelete(app, rows.at(-1).id).props.disabled, false)
+  assert.equal(app.requests.filter((request) => request.method === 'DELETE').length, 0)
+  app.unmount()
+})
+
+test('Admin orders offers only forward fulfillment states and valid cancelled restoration states', async () => {
+  const rows = [order({ id: 'shipment', status: 'SHIPPED' }), order({ id: 'delivered', status: 'DELIVERED' }), order({ id: 'cancelled', status: 'CANCELLED' })]
+  const app = page(ordersFile, { queues: { '/api/orders': [response(rows)] } })
+  await settle(); app.render()
+  assert.deepEqual(statusOptions(orderStatus(app, 'shipment')), ['SHIPPED', 'DELIVERED'])
+  assert.deepEqual(statusOptions(orderStatus(app, 'delivered')), ['DELIVERED'])
+  assert.deepEqual(statusOptions(orderStatus(app, 'cancelled')), ['CANCELLED', 'PENDING', 'PROCESSING'])
+  app.unmount()
+})
+
+test('Admin orders labels a verified pending order as awaiting review rather than awaiting payment', async () => {
+  const row = order({ verified: true })
+  const app = page(ordersFile, { queues: { '/api/orders': [response([row])] } })
+  await settle(); app.render()
+  const pending = nodes(orderStatus(app, row.id)).find((node) => node.type === 'option' && node.props.value === 'PENDING')
+  assert.equal(text(pending), 'در انتظار بررسی')
+  assert.match(text(app.tree), /پرداخت تأییدشده/)
+  assert.ok(!text(pending).includes('پرداخت'))
+  app.unmount()
+})
+
+for (const [label, failure] of [['offline', new TypeError('Failed to fetch')], ['HTTP failure', response({ error: 'Unavailable' }, 503)]]) {
+  test(`Admin orders ${label} shows a retry that reloads the canonical order list`, async () => {
+    const app = page(ordersFile, { queues: { '/api/orders': [failure, response([order()])] } })
+    await settle(); app.render()
+    assert.ok(find(app, (node) => node.props.role === 'alert'))
+    const button = find(app, (node) => node.type === 'button' && text(node) === 'بارگذاری دوباره')
+    assert.ok(button)
+    button.props.onClick(); app.render()
+    await settle(); app.render()
+    assert.ok(orderStatus(app, order().id))
+    assert.ok(!find(app, (node) => node.props.role === 'alert'))
+    assert.equal(app.requests.filter((request) => request.url === '/api/orders').length, 2)
+    app.unmount()
+  })
+}
+
+test('An admin status conflict refreshes canonical fulfillment and payment state instead of applying the rejected choice', async () => {
+  const original = order()
+  const canonical = order({ status: 'DELIVERED', verified: true })
+  let finish
+  const pending = new Promise((resolve) => { finish = resolve })
+  const app = page(ordersFile, { queues: {
+    '/api/orders': [response([original]), response([canonical])],
+    [`PATCH /api/orders/${original.id}`]: [() => pending],
+  } })
+  await settle(); app.render()
+  const update = orderStatus(app, original.id).props.onChange({ target: { value: 'CANCELLED' } })
+  app.render()
+  assert.equal(orderStatus(app, original.id).props.disabled, true)
+  assert.equal(orderDelete(app, original.id).props.disabled, true)
+  assert.equal(orderStatus(app, original.id).props.value, 'PENDING')
+  finish(response({ error: 'وضعیت سفارش هم‌زمان تغییر کرده است' }, 409))
+  await update; app.render()
+  assert.equal(orderStatus(app, original.id).props.value, 'DELIVERED')
+  assert.equal(orderStatus(app, original.id).props.disabled, false)
+  assert.deepEqual(statusOptions(orderStatus(app, original.id)), ['DELIVERED'])
+  assert.equal(orderDelete(app, original.id).props.disabled, true)
+  assert.match(text(app.tree), /پرداخت تأییدشده/)
+  assert.match(text(app.tree), /وضعیت سفارش هم‌زمان تغییر کرده است/)
+  assert.equal(app.requests.filter((request) => request.url === '/api/orders').length, 2)
+  assert.deepEqual(JSON.parse(app.requests.find((request) => request.method === 'PATCH').body), { status: 'CANCELLED' })
+  app.unmount()
+})
+
+test('A rejected admin status update retains its original state and displays the server reason', async () => {
+  const row = order()
+  const app = page(ordersFile, { queues: { [`PATCH /api/orders/${row.id}`]: [response({ error: 'پرداخت این سفارش تأیید نشده است' }, 400)] } })
+  await settle(); app.render()
+  await orderStatus(app, row.id).props.onChange({ target: { value: 'SHIPPED' } }); app.render()
+  assert.equal(orderStatus(app, row.id).props.value, 'PENDING')
+  assert.equal(orderStatus(app, row.id).props.disabled, false)
+  assert.match(text(app.tree), /پرداخت این سفارش تأیید نشده است/)
+  assert.equal(app.requests.filter((request) => request.url === '/api/orders').length, 1)
+  app.unmount()
+})
+
+test('An order deletion refused by the server preserves the row and shows its history protection error', async () => {
+  const row = order()
+  const app = page(ordersFile, { queues: { [`DELETE /api/orders/${row.id}`]: [response({ error: 'سابقه سفارش باید حفظ شود' }, 409)] } })
+  await settle(); app.render()
+  await orderDelete(app, row.id).props.onClick(); app.render()
+  assert.ok(orderStatus(app, row.id))
+  assert.equal(orderDelete(app, row.id).props.disabled, false)
+  assert.match(text(app.tree), /سابقه سفارش باید حفظ شود/)
+  app.unmount()
+})
