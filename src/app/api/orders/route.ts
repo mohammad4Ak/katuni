@@ -16,6 +16,7 @@ export async function GET() {
     include: {
       user: { select: { name: true, email: true } },
       items: { include: { product: { select: { name: true } } } },
+      invoice: { select: { id: true, issuedAt: true } },
     },
     orderBy: { createdAt: 'desc' },
   })
@@ -63,7 +64,7 @@ export async function POST(request: Request) {
   if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > 100) {
     return NextResponse.json({ error: 'سبد خرید خالی یا نامعتبر است' }, { status: 400 })
   }
-  if (typeof body.address !== 'string' || !body.address.trim() || body.address.length > 2000 ||
+  if (typeof body.address !== 'string' || !body.address.trim() || body.address.trim().length > 3000 ||
       typeof body.phone !== 'string' || !body.phone.trim() || body.phone.length > 50) {
     return NextResponse.json({ error: 'آدرس و شماره تماس معتبر الزامی است' }, { status: 400 })
   }
@@ -128,7 +129,8 @@ export async function POST(request: Request) {
   const existingCheckout = async () => {
     if (!checkoutKey) return null
     const existing = await prisma.order.findFirst({
-      where: { checkoutKey, userId: session.user.id }, include: { items: true },
+      where: { checkoutKey, userId: session.user.id },
+      include: { items: true, invoice: { select: { id: true, issuedAt: true } } },
     })
     if (existing && existing.checkoutFingerprint !== checkoutFingerprint) {
       throw new OrderError('اطلاعات این درخواست با سفارش ثبت‌شده متفاوت است؛ سفارش را دوباره بازبینی کنید', {
@@ -191,7 +193,7 @@ export async function POST(request: Request) {
         if (!validMoney(subtotal) || !Number.isSafeInteger(itemCount)) {
           throw new OrderError('مبلغ سفارش از سقف مجاز بیشتر است')
         }
-        orderItemsData.push({ ...item, price: product.price })
+        orderItemsData.push({ ...item, productName: product.name, price: product.price })
       }
 
       const shippingCost = calculateShippingCost(method, subtotal, itemCount)
@@ -226,7 +228,7 @@ export async function POST(request: Request) {
           shippingMethodId: method.id, shippingMethodName: method.name, shippingCost,
           items: { create: orderItemsData },
         },
-        include: { items: true },
+        include: { items: true, invoice: { select: { id: true, issuedAt: true } } },
       })
     })
     return NextResponse.json(order, { status: 201 })

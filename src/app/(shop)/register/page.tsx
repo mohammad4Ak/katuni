@@ -1,12 +1,13 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { signInWithSessionLock as signIn } from '@/lib/session-actions'
 import Link from 'next/link'
 import { ArrowLeft } from 'lucide-react'
 import AuthShell from '@/components/shop/AuthShell'
 import styles from '@/components/shop/account.module.css'
+import { requestSession } from '@/lib/session-client'
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState({
@@ -17,10 +18,13 @@ export default function RegisterPage() {
   })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [registered, setRegistered] = useState(false)
+  const submitting = useRef(false)
   const router = useRouter()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (submitting.current || registered) return
     setError('')
 
     if (formData.password !== formData.confirmPassword) {
@@ -34,6 +38,8 @@ export default function RegisterPage() {
     }
 
     setLoading(true)
+    submitting.current = true
+    let accountCreated = false
 
     try {
       // ثبتنام در دیتابیس
@@ -51,21 +57,29 @@ export default function RegisterPage() {
 
       if (!res.ok) {
         setError(data.error || 'خطا در ثبتنام')
-        setLoading(false)
         return
       }
+      accountCreated = true
+      setRegistered(true)
 
       // ورود خودکار پس از ثبتنام
-      await signIn('credentials', {
+      const result = await signIn('credentials', {
         email: formData.email,
         password: formData.password,
         redirect: false,
       })
+      const session = result?.ok && !result.error ? await requestSession() : null
+      if (!session?.user?.id || session.user.email?.toLowerCase() !== formData.email.trim().toLowerCase()) {
+        setError('حسابت ساخته شد، اما ورود خودکار کامل نشد. از صفحه ورود وارد حسابت شو.')
+        return
+      }
 
-      router.push('/')
+      router.push('/profile')
       router.refresh()
     } catch {
-      setError('خطای ارتباط با سرور')
+      setError(accountCreated ? 'حسابت ساخته شد، اما ورود خودکار کامل نشد. از صفحه ورود وارد حسابت شو.' : 'خطای ارتباط با سرور')
+    } finally {
+      submitting.current = false
       setLoading(false)
     }
   }
@@ -75,7 +89,12 @@ export default function RegisterPage() {
       <h1>شروع یه مسیر تازه.</h1>
       <p className={styles.authIntro}>حسابت رو بساز؛ سفارش‌ها و آدرس‌هات رو یک‌جا داشته باش.</p>
       {error && <div role="alert" className={styles.alert}>{error}</div>}
-      <form onSubmit={handleSubmit} className={styles.authForm}>
+      {registered ? (
+        <div role="status">
+          <p className={styles.authIntro}>{loading ? 'حسابت ساخته شد؛ در حال ورود…' : 'حسابت با موفقیت ساخته شد.'}</p>
+          {!loading && <Link href="/login" className="btn-primary w-full">ورود به حساب <ArrowLeft size={18} /></Link>}
+        </div>
+      ) : <form onSubmit={handleSubmit} className={styles.authForm}>
         <div>
           <label htmlFor="register-name">نام و نام خانوادگی</label>
           <input id="register-name" type="text" autoComplete="name" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="input-field" placeholder="نام کامل شما" required />
@@ -96,7 +115,7 @@ export default function RegisterPage() {
         <button type="submit" disabled={loading} className="btn-primary w-full disabled:opacity-50">
           {loading ? 'در حال ساخت حساب…' : 'ساخت حساب'}<ArrowLeft size={18} />
         </button>
-      </form>
+      </form>}
       <p className={styles.authFooter}>قبلاً ثبت‌نام کردی؟ <Link href="/login">وارد حسابت شو</Link></p>
     </AuthShell>
   )

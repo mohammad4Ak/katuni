@@ -64,6 +64,7 @@ function page(file = 'src/app/(shop)/products/page.tsx', { queues = {}, search =
     'lucide-react': new Proxy({}, { get: (_, name) => name }),
     '@/components/ui/BrandIcons': { SneakerIcon: 'SneakerIcon' },
     '@/components/shop/ProductCard': { __esModule: true, default: 'ProductCard' },
+    '@/components/shop/InvoiceDownload': { __esModule: true, default: 'InvoiceDownload' },
     '@/components/admin/MultiImageInput': { __esModule: true, default: 'MultiImageInput' },
     '@/lib/utils': { formatPrice: (value) => String(value) },
     '@/components/shop/commerce.module.css': css,
@@ -104,6 +105,77 @@ function text(tree) {
 const find = (app, predicate) => nodes(app.tree).find(predicate)
 const retry = (app) => find(app, (node) => node.type === 'button' && text(node) === 'تلاش دوباره')
 const cards = (app) => nodes(app.tree).filter((node) => node.type === 'ProductCard')
+
+test('Renaming a product does not resend the stale stock shown when the edit modal opened', async () => {
+  const app = page('src/app/admin/products/page.tsx', {
+    queues: { 'PUT /api/products/shoe-1': [response(shoe)] },
+  })
+  await settle(); app.render()
+  find(app, (node) => node.type === 'button' && node.props.title === 'ویرایش').props.onClick(); app.render()
+  find(app, (node) => node.type === 'input' && node.props.value === shoe.name).props.onChange({ target: { value: 'New product name' } }); app.render()
+  await find(app, (node) => node.type === 'form').props.onSubmit({ preventDefault() {} })
+  const saved = JSON.parse(app.requests.find((item) => item.method === 'PUT').body)
+  assert.equal(saved.name, 'New product name')
+  assert.equal(Object.hasOwn(saved, 'stock'), false)
+  assert.equal(Object.hasOwn(saved, 'expectedStock'), false)
+  app.unmount()
+})
+
+test('An intentional inventory edit carries its original count and conflict recovery preserves other changes', async () => {
+  const app = page('src/app/admin/products/page.tsx', { queues: {
+    'PUT /api/products/shoe-1': [response({ code: 'PRODUCT_STOCK_CHANGED', error: 'موجودی تغییر کرده است' }, 409), response(shoe)],
+    'GET /api/products/shoe-1': [response({ ...shoe, stock: 4 })],
+  } })
+  await settle(); app.render()
+  find(app, (node) => node.type === 'button' && node.props.title === 'ویرایش').props.onClick(); app.render()
+  find(app, (node) => node.type === 'input' && node.props.value === shoe.name).props.onChange({ target: { value: 'New product name' } }); app.render()
+  find(app, (node) => node.type === 'input' && node.props.value === String(shoe.stock)).props.onChange({ target: { value: '9' } }); app.render()
+  await find(app, (node) => node.type === 'form').props.onSubmit({ preventDefault() {} }); app.render()
+  assert.deepEqual(JSON.parse(app.requests.find((item) => item.method === 'PUT').body).expectedStock, 5)
+  assert.equal(find(app, (node) => node.type === 'button' && node.props.type === 'submit').props.disabled, true)
+  await find(app, (node) => node.type === 'form').props.onSubmit({ preventDefault() {} })
+  assert.equal(app.requests.filter((item) => item.method === 'PUT').length, 1)
+  find(app, (node) => node.type === 'button' && text(node) === 'تازه‌سازی موجودی').props.onClick()
+  await settle(); app.render()
+  assert.ok(find(app, (node) => node.type === 'input' && node.props.value === 'New product name'))
+  const freshStock = find(app, (node) => node.type === 'input' && node.props.value === '4')
+  assert.ok(freshStock)
+  freshStock.props.onChange({ target: { value: '8' } }); app.render()
+  await find(app, (node) => node.type === 'form').props.onSubmit({ preventDefault() {} })
+  const saved = JSON.parse(app.requests.filter((item) => item.method === 'PUT').at(-1).body)
+  assert.equal(saved.stock, 8)
+  assert.equal(saved.expectedStock, 4)
+  assert.equal(saved.name, 'New product name')
+  app.unmount()
+})
+
+for (const invalidSizes of ['42.5', '42abc', '42,,43', '۰،۴۲', '۴۲٫۵', '41,', '2147483648']) {
+  test(`Admin rejects malformed size entries without truncating or dropping them: ${invalidSizes}`, async () => {
+    const app = page('src/app/admin/products/page.tsx')
+    await settle(); app.render()
+    find(app, (node) => node.type === 'button' && node.props.title === 'ویرایش').props.onClick(); app.render()
+    find(app, (node) => node.type === 'input' && node.props.value === '42').props.onChange({ target: { value: invalidSizes } }); app.render()
+    await find(app, (node) => node.type === 'form').props.onSubmit({ preventDefault() {} }); app.render()
+    assert.match(text(app.tree), /سایزها باید عدد صحیح/)
+    assert.ok(find(app, (node) => node.props.role === 'dialog'))
+    assert.ok(find(app, (node) => node.type === 'input' && node.props.value === invalidSizes))
+    assert.equal(app.requests.filter((item) => item.method === 'PUT' || item.method === 'POST').length, 0)
+    assert.equal(find(app, (node) => node.type === 'button' && node.props.type === 'submit').props.disabled, false)
+    app.unmount()
+  })
+}
+
+test('Admin size input accepts Persian, Arabic and Latin digits with either comma separator', async () => {
+  const app = page('src/app/admin/products/page.tsx', {
+    queues: { 'PUT /api/products/shoe-1': [response(shoe)] },
+  })
+  await settle(); app.render()
+  find(app, (node) => node.type === 'button' && node.props.title === 'ویرایش').props.onClick(); app.render()
+  find(app, (node) => node.type === 'input' && node.props.value === '42').props.onChange({ target: { value: ' ۴۲، ٤٣, 44 ' } }); app.render()
+  await find(app, (node) => node.type === 'form').props.onSubmit({ preventDefault() {} })
+  assert.deepEqual(JSON.parse(app.requests.find((item) => item.method === 'PUT').body).sizes, [42, 43, 44])
+  app.unmount()
+})
 
 for (const search of ['کفش', 'ADIDAS-ULTRA', ' TRAIL ', 'lightweight']) {
   test(`Listing search includes names, slugs and descriptions with trimmed case-insensitive terms: ${search}`, async () => {
@@ -208,6 +280,39 @@ test('Admin orders preserves paid or fulfilled history by disabling its delete c
   }
   assert.equal(orderDelete(app, rows.at(-1).id).props.disabled, false)
   assert.equal(app.requests.filter((request) => request.method === 'DELETE').length, 0)
+  app.unmount()
+})
+
+test('Admin orders preserves issued invoices after cancellation or restoration even without verified payment', async () => {
+  const rows = ['CANCELLED', 'PENDING', 'PROCESSING'].map((status, index) => order({
+    id: `invoice-order-${index}`,
+    status,
+    verified: false,
+    invoice: { id: index + 1, issuedAt: '2026-10-01T08:30:00Z' },
+  }))
+  const app = page(ordersFile, { queues: { '/api/orders': [response(rows)] } })
+  await settle(); app.render()
+
+  for (const row of rows) {
+    const button = orderDelete(app, row.id)
+    assert.equal(button.props.disabled, true)
+    assert.match(button.props.title, /دارای فاکتور.*حفظ سابقه/)
+    await button.props.onClick()
+    assert.equal(app.confirmations.length, 0)
+    assert.equal(app.requests.filter((request) => request.method === 'DELETE').length, 0)
+
+    const tableRow = find(app, (node) => node.type === 'tr' && nodes(node).some((child) =>
+      child.type === 'select' && child.props['aria-label'] === `وضعیت سفارش ${row.id.slice(-6)}`))
+    const detailsToggle = nodes(tableRow).find((node) => node.type === 'button' && 'aria-expanded' in node.props)
+    assert.ok(detailsToggle)
+    detailsToggle.props.onClick(); app.render()
+
+    const invoiceControl = find(app, (node) => node.type === 'InvoiceDownload')
+    assert.ok(invoiceControl)
+    assert.equal(invoiceControl.props.orderId, row.id)
+    assert.equal(invoiceControl.props.status, row.status)
+    assert.equal(invoiceControl.props.invoice, row.invoice)
+  }
   app.unmount()
 })
 

@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { auth } from '@/lib/auth'
+import { buildInvoiceSnapshot, isInvoiceEligibleStatus } from '@/lib/invoice'
 
 const validStatuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'] as const
 type OrderStatus = typeof validStatuses[number]
 const orderDetails = {
   user: { select: { name: true, email: true } },
-  items: { include: { product: { select: { name: true } } } },
+  items: { include: { product: { select: { name: true } } }, orderBy: { id: 'asc' } },
+  invoice: { select: { id: true, issuedAt: true } },
 } as const
 
 class StatusError extends Error {
@@ -46,11 +48,12 @@ export async function PATCH(
     const order = await prisma.$transaction(async (tx) => {
       const existing = await tx.order.findUnique({ where: { id }, include: orderDetails })
       if (!existing) throw new StatusError('سفارش یافت نشد', 404)
-      if (existing.status === nextStatus) return existing
+      const issueInvoice = isInvoiceEligibleStatus(nextStatus) && !existing.invoice
+      if (existing.status === nextStatus && !issueInvoice) return existing
 
       // A cancellation is not a return: shipped goods cannot be put back into stock.
-      if (existing.status === 'DELIVERED' ||
-          (existing.status === 'SHIPPED' && nextStatus !== 'DELIVERED')) {
+      if (existing.status !== nextStatus && (existing.status === 'DELIVERED' ||
+          (existing.status === 'SHIPPED' && nextStatus !== 'DELIVERED'))) {
         throw new StatusError('سفارش ارسال‌شده یا تحویل‌شده قابل بازگشت به وضعیت قبلی یا لغو نیست؛ مرجوعی باید جداگانه بررسی شود')
       }
       if (existing.status === 'CANCELLED' && nextStatus !== 'PENDING' && nextStatus !== 'PROCESSING') {
@@ -61,7 +64,9 @@ export async function PATCH(
       // both restore or reserve inventory using the same stale order snapshot.
       const changed = await tx.order.updateMany({
         where: { id, status: existing.status, updatedAt: existing.updatedAt },
-        data: { status: nextStatus },
+        // Legacy no-op approvals also need a new row version if the first
+        // issuance happens within the same millisecond as another mutation.
+        data: { status: nextStatus, updatedAt: new Date(Math.max(Date.now(), existing.updatedAt.getTime() + 1)) },
       })
       if (changed.count !== 1) throw new StatusError('وضعیت سفارش هم‌زمان تغییر کرده است؛ صفحه را تازه کنید')
 
@@ -80,6 +85,14 @@ export async function PATCH(
             throw new StatusError(`موجودی «${product?.name ?? 'محصول'}» برای بازگشایی سفارش کافی نیست`)
           }
         }
+      }
+
+      // The order row was claimed before issuance. Concurrent approvals cannot
+      // issue twice, and a failed invoice insert rolls the status/stock back.
+      if (issueInvoice) {
+        await tx.invoice.create({
+          data: { orderId: id, snapshot: { ...buildInvoiceSnapshot(existing) } },
+        })
       }
 
       return tx.order.findUnique({ where: { id }, include: orderDetails })
@@ -104,14 +117,17 @@ export async function DELETE(
 
   try {
     await prisma.$transaction(async (tx) => {
-      const order = await tx.order.findUnique({ where: { id }, include: { items: true } })
+      const order = await tx.order.findUnique({
+        where: { id }, include: { items: true, invoice: { select: { id: true } } },
+      })
       if (!order) throw new StatusError('سفارش یافت نشد', 404)
+      if (order.invoice) throw new StatusError('سفارش دارای فاکتور قابل حذف نیست؛ برای توقف سفارش وضعیت لغوشده را انتخاب کنید')
       if (order.verified || order.status === 'SHIPPED' || order.status === 'DELIVERED') {
         throw new StatusError('سوابق سفارش پرداخت‌شده، ارسال‌شده یا تحویل‌شده قابل حذف نیست')
       }
 
       const claimed = await tx.order.updateMany({
-        where: { id, status: order.status, updatedAt: order.updatedAt, verified: false },
+        where: { id, status: order.status, updatedAt: order.updatedAt, verified: false, invoice: { is: null } },
         data: { status: 'CANCELLED' },
       })
       if (claimed.count !== 1) throw new StatusError('وضعیت سفارش هم‌زمان تغییر کرده است؛ صفحه را تازه کنید')

@@ -16,7 +16,10 @@ function loadModule(filename, globals = {}, dependencies = {}) {
     if (cache.has(absolute)) return cache.get(absolute)
     const testModule = { exports: {} }
     cache.set(absolute, testModule.exports)
-    const { code } = transformSync(readFileSync(absolute, 'utf8'), { loader: 'ts', format: 'cjs', target: 'es2022' })
+    const { code } = transformSync(readFileSync(absolute, 'utf8'), {
+      loader: path.extname(absolute) === '.tsx' ? 'tsx' : 'ts',
+      jsx: 'automatic', format: 'cjs', target: 'es2022',
+    })
     const requireDependency = (name) => {
       if (name in dependencies) return dependencies[name]
       if (name.startsWith('./')) return readModule(path.relative(root, path.join(path.dirname(absolute), `${name}.ts`)))
@@ -105,6 +108,79 @@ function activityFixture(overrides = {}) {
     renewInAnotherTab: () => { serverActivityAt = clock.now() },
   }
 }
+
+test('The actual provider preserves customer sessions across refreshes and cancels browser timers safely', async () => {
+  const clock = fakeClock()
+  const effects = []
+  const sessions = []
+  const listeners = new Map()
+  const canceledTimers = []
+  let reads = 0
+  let routeRefreshes = 0
+  const browserWindow = {
+    addEventListener: (event, listener) => listeners.set(event, listener),
+    removeEventListener: (event) => listeners.delete(event),
+    clearTimeout: function (timer) {
+      // Native browser timers reject the options object as their receiver.
+      // An arrow fakeClock.cancel alone cannot catch that provider wiring bug.
+      if (this !== browserWindow) throw new TypeError('Illegal invocation')
+      canceledTimers.push(timer)
+      clock.cancel(timer)
+    },
+  }
+  const BrowserDate = class extends Date { static now() { return clock.now() } }
+  const { createSessionActivity } = loadModule('src/lib/session-activity.ts')
+  const { default: SessionActivityProvider } = loadModule('src/components/auth/SessionActivityProvider.tsx', {
+    Date: BrowserDate,
+    window: browserWindow,
+    document: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} },
+    localStorage: { setItem() {} },
+    BroadcastChannel: undefined,
+    setTimeout: clock.schedule,
+    clearTimeout: browserWindow.clearTimeout,
+  }, {
+    react: {
+      createContext: () => ({ Provider: 'session-provider' }),
+      useState: () => [null, (session) => sessions.push(session)],
+      useRef: (current) => ({ current }),
+      useEffect: (effect) => effects.push(effect),
+      useCallback: (callback) => callback,
+    },
+    'react/jsx-runtime': { jsx: (type, props) => ({ type, props }) },
+    'next/navigation': { usePathname: () => '/login', useRouter: () => ({ refresh: () => { routeRefreshes++ } }) },
+    '@/lib/session-activity': { createSessionActivity },
+    '@/lib/session-client': { requestSession: async () => {
+      reads++
+      return {
+        user: { id: 'customer', role: 'USER', name: 'Name', email: 'user@example.com' },
+        expires: new Date(start + idleTimeout).toISOString(),
+      }
+    } },
+  })
+  const provider = SessionActivityProvider({ children: null })
+  const cleanup = effects[0]()
+  effects[1]()
+  await settle()
+  assert.equal(reads, 1, 'Initial effects share the in-flight session read')
+  assert.equal(clock.timers(), 1)
+
+  for (let i = 0; i < 3; i++) {
+    const session = await provider.props.value.refresh()
+    assert.equal(session.user.id, 'customer')
+    assert.equal(clock.timers(), 1, 'Each refresh replaces the expiry timer')
+  }
+  assert.equal(reads, 4, 'Valid responses must not enter the network retry delay')
+  assert.equal(canceledTimers.length, 3)
+  assert.equal(sessions.at(-1).user.role, 'USER')
+  assert.equal(routeRefreshes, 0)
+
+  listeners.get('pointerdown')({ isTrusted: true })
+  assert.equal(clock.timers(), 2, 'Actual input schedules the throttled activity renewal')
+  cleanup()
+  assert.equal(clock.timers(), 0, 'Unmount cancels both expiry and activity timers')
+  assert.equal(canceledTimers.length, 5)
+  assert.equal(listeners.size, 0)
+})
 
 test('An idle session expires after 30 minutes without any activity renewal', async () => {
   const fixture = activityFixture()

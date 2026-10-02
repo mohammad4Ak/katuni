@@ -22,7 +22,8 @@
     "test:orders-business": "node --test scripts/test-orders-business.cjs",
     "test:catalog-ui": "node --test scripts/test-catalog-ui.cjs",
     "test:session-activity": "node --test scripts/test-session-activity.cjs",
-    "test": "node --test scripts/test-account-catalog.cjs scripts/test-catalog-ui.cjs scripts/test-checkout-shipping.cjs scripts/test-orders-auth.cjs scripts/test-orders-business.cjs scripts/test-payment-result.cjs scripts/test-sales-report.cjs scripts/test-shipping.cjs scripts/test-shop-motion.cjs scripts/test-session-activity.cjs"
+    "test": "node --test scripts/test-account-catalog.cjs scripts/test-catalog-ui.cjs scripts/test-checkout-shipping.cjs scripts/test-orders-auth.cjs scripts/test-orders-business.cjs scripts/test-payment-result.cjs scripts/test-sales-report.cjs scripts/test-shipping.cjs scripts/test-shop-motion.cjs scripts/test-session-activity.cjs scripts/test-invoice.cjs scripts/test-invoice-download.cjs scripts/test-invoice-download-ui.cjs scripts/test-auth-ui.cjs scripts/test-profile-account-ui.cjs",
+    "test:invoice": "node --test scripts/test-invoice.cjs scripts/test-invoice-download.cjs scripts/test-invoice-download-ui.cjs"
   },
   "keywords": [
     "فروشگاه",
@@ -38,6 +39,7 @@
     "@vercel/blob": "^2.8.0",
     "bcryptjs": "^3.0.3",
     "clsx": "^2.1.1",
+    "jspdf": "^4.2.1",
     "lucide-react": "^1.31.0",
     "next": "^16.3.0",
     "next-auth": "^5.0.0-beta.32",

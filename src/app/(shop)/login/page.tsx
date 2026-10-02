@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { signInWithSessionLock as signIn } from '@/lib/session-actions'
 import Link from 'next/link'
@@ -14,10 +14,13 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const submitting = useRef(false)
   const router = useRouter()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (submitting.current) return
+    submitting.current = true
     setLoading(true)
     setError('')
 
@@ -30,21 +33,30 @@ export default function LoginPage() {
 
       if (result?.error) {
         setError('ایمیل یا رمز عبور اشتباه است')
-        setLoading(false)
+        return
+      }
+      if (!result?.ok) {
+        setError('ورود کامل نشد. دوباره تلاش کن.')
         return
       }
 
       // بررسی نقش کاربر برای هدایت
       const session = await requestSession()
+      if (!session?.user?.id || session.user.email?.toLowerCase() !== email.trim().toLowerCase()) {
+        setError('ورود کامل نشد. دوباره تلاش کن.')
+        return
+      }
 
       if (session?.user?.role === 'ADMIN') {
         router.push('/admin')
       } else {
-        router.push('/')
+        router.push('/profile')
       }
       router.refresh()
     } catch {
       setError('خطای ارتباط با سرور')
+    } finally {
+      submitting.current = false
       setLoading(false)
     }
   }

@@ -348,8 +348,8 @@ test('Stocked products require a size using merged existing and updated values',
   assert.equal((await create.POST(request({ name: 'Name', price: 100, categoryId: 'cat', stock: 1, sizes: [] }))).status, 400)
   for (const scenario of [
     { existing: { stock: 5, sizes: [41] }, body: { sizes: [] }, expected: 400 },
-    { existing: { stock: 0, sizes: [] }, body: { stock: 2 }, expected: 400 },
-    { existing: { stock: 0, sizes: [] }, body: { stock: 2, sizes: [42] }, expected: 200 },
+    { existing: { stock: 0, sizes: [] }, body: { stock: 2, expectedStock: 0 }, expected: 400 },
+    { existing: { stock: 0, sizes: [] }, body: { stock: 2, sizes: [42], expectedStock: 0 }, expected: 200 },
     { existing: { stock: 5, sizes: [41] }, body: { price: 200 }, expected: 200 },
   ]) {
     let updates = 0
@@ -359,6 +359,57 @@ test('Stocked products require a size using merged existing and updated values',
     } } })
     assert.equal((await handlers.PUT(request(scenario.body), context())).status, scenario.expected)
     assert.equal(updates, scenario.expected === 200 ? 1 : 0)
+  }
+})
+
+test('Stale admin inventory edits never restore stock consumed by a checkout', async () => {
+  let writes = 0
+  const { handlers } = load('src/app/api/products/[id]/route.ts', { prisma: { product: {
+    findUnique: async () => ({ stock: 7, sizes: [42] }),
+    update: async () => { writes++; return {} },
+  } } })
+  const result = await handlers.PUT(request({ name: 'Renamed shoe', stock: 10, expectedStock: 8 }), context())
+  assert.equal(result.status, 409)
+  assert.equal((await result.json()).code, 'PRODUCT_STOCK_CHANGED')
+  assert.equal(writes, 0)
+})
+
+test('Inventory writes require a valid previous count, while metadata edits preserve current inventory', async () => {
+  const row = { id: 'target', stock: 7, sizes: [42], name: 'Original' }
+  let writes = 0
+  const { handlers } = load('src/app/api/products/[id]/route.ts', { prisma: { product: {
+    findUnique: async () => ({ ...row }),
+    update: async ({ data }) => { writes++; return Object.assign(row, data) },
+  } } })
+  for (const expectedStock of [undefined, null, -1, 1.5, 'invalid']) {
+    assert.equal((await handlers.PUT(request({ stock: 9, expectedStock }), context())).status, 400)
+  }
+  assert.equal(writes, 0)
+  assert.equal((await handlers.PUT(request({ name: 'Renamed shoe' }), context())).status, 200)
+  assert.equal(row.stock, 7)
+  assert.equal(row.name, 'Renamed shoe')
+  assert.equal((await handlers.PUT(request({ stock: 9, expectedStock: 7 }), context())).status, 200)
+  assert.equal(row.stock, 9)
+})
+
+test('A checkout racing after the inventory read is caught atomically without partial metadata writes', async () => {
+  for (const body of [{ stock: 10, expectedStock: 8, name: 'New name' }, { sizes: [], name: 'New name' }]) {
+    const row = { stock: body.stock === undefined ? 0 : 8, sizes: [42], name: 'Original' }
+    const { handlers } = load('src/app/api/products/[id]/route.ts', { prisma: { product: {
+      findUnique: async () => ({ ...row }),
+      update: async ({ where, data }) => {
+        // Simulate checkout/reservation release after validation but before UPDATE.
+        row.stock += body.stock === undefined ? 1 : -1
+        if (where.stock !== undefined && where.stock !== row.stock) throw { code: 'P2025' }
+        return Object.assign(row, data)
+      },
+    } } })
+    const result = await handlers.PUT(request(body), context())
+    assert.equal(result.status, 409)
+    assert.equal((await result.json()).code, 'PRODUCT_STOCK_CHANGED')
+    assert.equal(row.stock, body.stock === undefined ? 1 : 7)
+    assert.equal(row.name, 'Original')
+    assert.deepEqual(row.sizes, [42])
   }
 })
 

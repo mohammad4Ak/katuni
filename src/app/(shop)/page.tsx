@@ -46,9 +46,9 @@ export default async function HomePage() {
           <div className={styles.heroCopy} data-reveal>
             <p className={styles.eyebrow}><span /> حرکت، به سبک خودت</p>
             <h1 id="home-title">یه قدم جلوتر،<br /><span>یه حس بهتر.</span></h1>
-            <p className={styles.heroDescription}>از کتانیِ هر روزت تا همراهِ ماجراجویی‌هات؛<br />جفت بعدی‌ات اینجاست.</p>
+            <p className={styles.heroDescription}>از کتونیِ هر روزت تا همراهِ ماجراجویی‌هات؛<br />جفت بعدی‌ات اینجاست.</p>
             <div className={styles.heroActions}>
-              <Link className={styles.primaryLink} href={categoryHref('sneaker')} data-motion="action">کتانی‌ها رو ببین <ArrowLeft size={20} /></Link>
+              <Link className={styles.primaryLink} href={categoryHref('sneaker')} data-motion="action">کتونی‌ها رو ببین <ArrowLeft size={20} /></Link>
               <Link className={styles.secondaryLink} href="/products" data-motion="action">همهٔ محصولات <ArrowUpLeft size={18} /></Link>
             </div>
             <div className={styles.heroNote}><SneakerIcon size={19} /><span>برای روزهایی که قرار نیست یک‌جا بمانی.</span></div>

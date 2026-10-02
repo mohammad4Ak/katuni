@@ -18,6 +18,7 @@ function load(file, dependencies = {}) {
   return context.module.exports
 }
 const shipping = load('src/lib/shipping.ts')
+const invoice = load('src/lib/invoice.ts')
 const clone = (value) => structuredClone(value)
 const method = { id: 'post', name: 'پست پیشتاز', baseCost: 50000, additionalItemCost: 10000, freeShippingThreshold: null, isActive: true }
 const product = { id: 'shoe', name: 'کفش', price: 100000, stock: 10, sizes: [42, 43], colors: ['سبز', 'مشکی'] }
@@ -135,6 +136,25 @@ test('The recipient name is trimmed and captured independently from the buyer na
   const legacy = createHarness()
   assert.equal((await legacy.post(body)).status, 201)
   assert.equal(legacy.committed.orders[0].recipientName, 'نام خریدار')
+})
+
+test('New order lines capture the checkout name independently of later catalog edits', async () => {
+  const h = createHarness()
+  assert.equal((await h.post(body)).status, 201)
+  h.committed.products.get('shoe').name = 'نام تازهٔ محصول'
+  assert.equal(h.committed.orders[0].items[0].productName, 'کفش')
+})
+
+test('Checkout accepts the same address length supported by saved profile addresses', async () => {
+  const h = createHarness()
+  const address = 'ن'.repeat(3000)
+  const response = await h.post({ ...body, address: `  ${address}  ` })
+  assert.equal(response.status, 201)
+  assert.equal(h.committed.orders[0].address, address)
+  const invalid = createHarness()
+  assert.equal((await invalid.post({ ...body, address: 'ن'.repeat(3001) })).status, 400)
+  assert.equal(invalid.committed.orders.length, 0)
+  assert.equal(invalid.mutations.length, 0)
 })
 
 test('Invalid recipient names fail before reserving inventory', async () => {
@@ -274,16 +294,22 @@ test('Invalid checkout keys fail before stock changes; requests without keys rem
   assert.equal(h.committed.orders.length, 2)
 })
 
-const order = { id: 'order', status: 'PENDING', verified: false, updatedAt: new Date('2026-10-01T10:00:00Z'),
+const order = { id: 'order', status: 'PENDING', verified: false, invoice: null,
+  createdAt: new Date('2026-09-29T10:00:00Z'), updatedAt: new Date('2026-10-01T10:00:00Z'),
+  recipientName: 'گیرنده', address: 'تهران', phone: '09123456789',
+  shippingMethodName: 'پست', shippingCost: 50000, total: 350000,
   user: { name: 'خریدار', email: 'buyer@example.test' },
-  items: [{ productId: 'shoe', quantity: 2 }, { productId: 'shoe', quantity: 1 }],
+  items: [
+    { productId: 'shoe', productName: 'نام هنگام خرید', product: { name: 'نام فعلی' }, quantity: 2, size: 42, color: 'سبز', price: 100000 },
+    { productId: 'shoe', productName: 'نام هنگام خرید', product: { name: 'نام فعلی' }, quantity: 1, size: 43, color: 'مشکی', price: 100000 },
+  ],
 }
 
 // Simulate row-lock and READ COMMITTED semantics: concurrent readers may see the
 // same order, but a conditional update waits for the winner and rechecks its filter.
 function statusHarness({ initial = order, stocks = { shoe: 7 }, overlap = false,
-  session = { user: { id: 'admin', role: 'ADMIN' } }, failDelete = false } = {}) {
-  const committed = { order: clone(initial), stocks: clone(stocks) }
+  session = { user: { id: 'admin', role: 'ADMIN' } }, failDelete = false, failInvoice = false } = {}) {
+  const committed = { order: clone(initial), stocks: clone(stocks), invoices: [] }
   const mutations = []
   let transactions = 0
   let queue = Promise.resolve()
@@ -312,10 +338,11 @@ function statusHarness({ initial = order, stocks = { shoe: 7 }, overlap = false,
           const current = committed.order
           if (!current || current.id !== where.id || current.status !== where.status ||
               current.updatedAt.getTime() !== where.updatedAt.getTime() ||
-              (where.verified !== undefined && current.verified !== where.verified)) return { count: 0 }
+              (where.verified !== undefined && current.verified !== where.verified) ||
+              (where.invoice?.is === null && current.invoice)) return { count: 0 }
           draft = clone(committed)
           draft.order.status = data.status
-          draft.order.updatedAt = new Date(current.updatedAt.getTime() + 1)
+          draft.order.updatedAt = data.updatedAt ? new Date(data.updatedAt) : new Date(current.updatedAt.getTime() + 1)
           return { count: 1 }
         },
         delete: async () => {
@@ -339,6 +366,15 @@ function statusHarness({ initial = order, stocks = { shoe: 7 }, overlap = false,
         findUnique: async () => ({ name: 'کفش' }),
       },
       orderItem: { deleteMany: async () => {} },
+      invoice: { create: async ({ data }) => {
+        assert.ok(draft, 'Invoice issued before the order row was claimed')
+        if (failInvoice) throw new Error('invoice failed')
+        assert.equal(draft.invoices.some((row) => row.orderId === data.orderId), false)
+        const row = { id: draft.invoices.length + 1, issuedAt: new Date('2026-10-01T12:00:00Z'), ...clone(data) }
+        draft.invoices.push(row)
+        draft.order.invoice = { id: row.id, issuedAt: row.issuedAt }
+        return clone(row)
+      } },
     }
     try {
       const result = await callback(tx)
@@ -348,6 +384,7 @@ function statusHarness({ initial = order, stocks = { shoe: 7 }, overlap = false,
   } }
   const route = load('src/app/api/orders/[id]/route.ts', {
     'next/server': { NextResponse: Response }, '@/lib/prisma': { prisma }, '@/lib/auth': { auth: async () => session },
+    '@/lib/invoice': invoice,
   })
   const params = { params: Promise.resolve({ id: 'order' }) }
   return { committed, mutations, transactions: () => transactions,
@@ -449,4 +486,75 @@ test('Concurrent delete/cancel cannot restore stock twice, and missing orders re
   const absent = statusHarness({ initial: null })
   assert.equal((await absent.patch('CANCELLED')).status, 404)
   assert.equal((await absent.delete()).status, 404)
+})
+
+test('First approval issues one invoice atomically without claiming payment; all later statuses retain it', async () => {
+  const h = statusHarness()
+  const response = await h.patch('PROCESSING')
+  assert.equal(response.status, 200)
+  const approved = await response.json()
+  assert.deepEqual(Object.keys(approved.invoice).sort(), ['id', 'issuedAt'])
+  assert.equal(approved.verified, false)
+  assert.equal(h.committed.invoices.length, 1)
+  const issued = clone(h.committed.invoices[0])
+  assert.equal(issued.snapshot.items[0].productName, 'نام هنگام خرید')
+  assert.equal(issued.snapshot.subtotal, 300000)
+  assert.equal(issued.snapshot.total, 350000)
+  h.committed.order.user.name = 'نام جدید'
+  h.committed.order.items[0].product.name = 'محصول جدید'
+  for (const status of ['PROCESSING', 'CANCELLED', 'PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED']) {
+    assert.equal((await h.patch(status)).status, 200)
+    assert.deepEqual(h.committed.invoices, [issued])
+    assert.equal((await h.delete()).status, 409)
+  }
+})
+
+test('Direct fulfillment and unchanged legacy approved statuses issue one missing invoice', async () => {
+  for (const status of ['PROCESSING', 'SHIPPED', 'DELIVERED']) {
+    const fresh = statusHarness()
+    assert.equal((await fresh.patch(status)).status, 200)
+    assert.equal(fresh.committed.invoices.length, 1)
+    const legacy = statusHarness({ initial: { ...order, status } })
+    assert.equal((await legacy.patch(status)).status, 200)
+    assert.equal(legacy.committed.invoices.length, 1)
+    assert.equal((await legacy.patch(status)).status, 200)
+    assert.equal(legacy.committed.invoices.length, 1)
+  }
+  for (const status of ['PENDING', 'CANCELLED']) {
+    const h = statusHarness({ initial: { ...order, status } })
+    assert.equal((await h.patch(status)).status, 200)
+    assert.equal(h.committed.invoices.length, 0)
+  }
+})
+
+test('Concurrent approvals, unchanged legacy approval and delete cannot duplicate invoices or lose issued records', async () => {
+  for (const initialStatus of ['PENDING', 'PROCESSING']) {
+    const h = statusHarness({ initial: { ...order, status: initialStatus }, overlap: true })
+    const responses = await Promise.all([h.patch('PROCESSING'), h.patch('PROCESSING')])
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409])
+    assert.equal(h.committed.invoices.length, 1)
+  }
+  const h = statusHarness({ overlap: true })
+  const responses = await Promise.all([h.patch('PROCESSING'), h.delete()])
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409])
+  if (responses[0].status === 200) {
+    assert.equal(h.committed.invoices.length, 1)
+    assert.equal(h.committed.order.status, 'PROCESSING')
+    assert.equal(h.committed.stocks.shoe, 7)
+  } else {
+    assert.equal(h.committed.invoices.length, 0)
+    assert.equal(h.committed.order, null)
+    assert.equal(h.committed.stocks.shoe, 10)
+  }
+})
+
+test('Invoice persistence failure rolls approval and reopened inventory back together', async () => {
+  for (const status of ['PENDING', 'CANCELLED']) {
+    const h = statusHarness({ initial: { ...order, status }, failInvoice: true, stocks: { shoe: 10 } })
+    assert.equal((await h.patch('PROCESSING')).status, 500)
+    assert.equal(h.committed.order.status, status)
+    assert.equal(h.committed.order.invoice, null)
+    assert.equal(h.committed.invoices.length, 0)
+    assert.equal(h.committed.stocks.shoe, 10)
+  }
 })

@@ -44,7 +44,7 @@ export default function SessionActivityProvider({ children }: { children: React.
       onExpired: () => router.refresh(),
       now: Date.now,
       schedule: (callback, delay) => setTimeout(callback, delay),
-      cancel: clearTimeout,
+      cancel: (timer) => window.clearTimeout(timer),
     })
     controller.current = monitor
     const check = () => { void monitor.refresh().catch(() => {}) }

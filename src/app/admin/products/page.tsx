@@ -44,6 +44,8 @@ export default function AdminProductsPage() {
   const [reloadKey, setReloadKey] = useState(0)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [originalStock, setOriginalStock] = useState<number | null>(null)
+  const [stockConflict, setStockConflict] = useState(false)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null)
@@ -78,6 +80,8 @@ export default function AdminProductsPage() {
 
   const openCreateModal = () => {
     setEditingId(null)
+    setOriginalStock(null)
+    setStockConflict(false)
     setForm({ ...emptyForm, categoryId: categories[0]?.id ?? '' })
     setMessage(null)
     setModalOpen(true)
@@ -86,6 +90,8 @@ export default function AdminProductsPage() {
 
   const openEditModal = (product: Product) => {
     setEditingId(product.id)
+    setOriginalStock(product.stock)
+    setStockConflict(false)
     setForm({
       name: product.name,
       description: product.description,
@@ -103,6 +109,15 @@ export default function AdminProductsPage() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (saving || stockConflict) return
+    const sizeText = form.sizes.trim()
+      .replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - '۰'.charCodeAt(0)))
+      .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - '٠'.charCodeAt(0)))
+    const sizeEntries = sizeText === '' ? [] : sizeText.split(/[,،]/).map((value) => value.trim())
+    if (sizeEntries.some((value) => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1 || Number(value) > 2_147_483_647)) {
+      setMessage({ text: 'سایزها باید عدد صحیح و بزرگ‌تر از صفر باشند و با کاما جدا شوند؛ مثل ۴۰، ۴۱، ۴۲. سایز اعشاری یا متن نامعتبر ذخیره نمی‌شود.', error: true })
+      return
+    }
     setSaving(true)
     setMessage(null)
 
@@ -112,9 +127,11 @@ export default function AdminProductsPage() {
       price: Number(form.price),
       images: form.images,
       categoryId: form.categoryId,
-      sizes: form.sizes.split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n)),
+      sizes: sizeEntries.map(Number),
       colors: form.colors.split(',').map((c) => c.trim()).filter(Boolean),
-      stock: Number(form.stock) || 0,
+      ...(!editingId ? { stock: Number(form.stock) } : Number(form.stock) !== originalStock
+        ? { stock: Number(form.stock), expectedStock: originalStock }
+        : {}),
       featured: form.featured,
     }
 
@@ -128,6 +145,7 @@ export default function AdminProductsPage() {
       const data = await res.json()
 
       if (!res.ok) {
+        if (data.code === 'PRODUCT_STOCK_CHANGED') setStockConflict(true)
         setMessage({ text: data.error || 'خطا در ذخیره محصول', error: true })
         return
       }
@@ -138,6 +156,25 @@ export default function AdminProductsPage() {
       setReloadKey((value) => value + 1)
     } catch {
       setMessage({ text: 'خطای ارتباط با سرور', error: true })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const refreshStock = async () => {
+    if (!editingId || saving) return
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/products/${encodeURIComponent(editingId)}`, { cache: 'no-store' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'دریافت موجودی تازه انجام نشد.')
+      if (!Number.isSafeInteger(data.stock) || data.stock < 0) throw new Error('پاسخ موجودی معتبر نیست.')
+      setOriginalStock(data.stock)
+      setForm((previous) => ({ ...previous, stock: String(data.stock) }))
+      setStockConflict(false)
+      setMessage({ text: 'موجودی تازه بارگذاری شد. مقدار موجودی را بررسی کن و سپس تغییرات را ذخیره کن.', error: false })
+    } catch (cause) {
+      setMessage({ text: cause instanceof Error && cause.name !== 'TypeError' ? cause.message : 'دریافت موجودی تازه انجام نشد.', error: true })
     } finally {
       setSaving(false)
     }
@@ -267,6 +304,7 @@ export default function AdminProductsPage() {
               </h2>
               <button
                 onClick={() => setModalOpen(false)}
+                disabled={saving}
                 aria-label="بستن فرم محصول"
                 className="p-2 hover:bg-fog rounded-2xl transition-colors"
               >
@@ -378,6 +416,7 @@ export default function AdminProductsPage() {
 
               {message && (
                 <div
+                  role={message.error ? 'alert' : 'status'}
                   className={`px-4 py-3 rounded-2xl ${
                     message.error
                       ? 'bg-red-50 border border-red-200 text-red-700'
@@ -385,13 +424,14 @@ export default function AdminProductsPage() {
                   }`}
                 >
                   {message.text}
+                  {stockConflict && <button type="button" onClick={() => void refreshStock()} disabled={saving} className="btn-outline mt-3 block disabled:opacity-50">تازه‌سازی موجودی</button>}
                 </div>
               )}
 
               <div className="flex gap-3 pt-2">
                 <button
                   type="submit"
-                  disabled={saving}
+                  disabled={saving || stockConflict}
                   className="btn-primary flex-1 disabled:opacity-50"
                 >
                   {saving ? 'در حال ذخیره...' : editingId ? 'ذخیره تغییرات' : 'افزودن محصول'}
@@ -399,6 +439,7 @@ export default function AdminProductsPage() {
                 <button
                   type="button"
                   onClick={() => setModalOpen(false)}
+                  disabled={saving}
                   className="btn-outline flex-1"
                 >
                   انصراف

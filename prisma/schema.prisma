@@ -67,6 +67,7 @@ model Order {
   user               User            @relation(fields: [userId], references: [id])
   userId             String
   items              OrderItem[]
+  invoice            Invoice?
   total              Int
   status             OrderStatus     @default(PENDING)
   recipientName      String?
@@ -109,10 +110,19 @@ model OrderItem {
   orderId   String
   product   Product @relation(fields: [productId], references: [id])
   productId String
+  productName String?
   quantity  Int
   size      Int
   color     String
   price     Int
+}
+
+model Invoice {
+  id       Int      @id @default(autoincrement())
+  order    Order    @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  orderId  String   @unique
+  issuedAt DateTime @default(now())
+  snapshot Json
 }
 
 enum Role {

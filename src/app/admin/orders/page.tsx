@@ -3,6 +3,8 @@
 import { Fragment, useState, useEffect, useCallback } from 'react'
 import { Trash2, ChevronDown } from 'lucide-react'
 import { formatPrice } from '@/lib/utils'
+import type { InvoiceMetadata } from '@/lib/invoice'
+import InvoiceDownload from '@/components/shop/InvoiceDownload'
 import styles from '@/components/admin/admin.module.css'
 
 interface Order {
@@ -16,8 +18,9 @@ interface Order {
   address: string
   phone: string
   createdAt: string
+  invoice?: InvoiceMetadata | null
   user: { name: string; email: string }
-  items: { id: string; quantity: number; size: number; color: string; price: number; product: { name: string } }[]
+  items: { id: string; quantity: number; size: number; color: string; price: number; productName?: string | null; product: { name: string } }[]
 }
 
 const statusLabels: Record<string, { label: string; color: string }> = {
@@ -77,6 +80,7 @@ export default function AdminOrdersPage() {
   }
 
   const handleDelete = async (id: string) => {
+    if (orders.find((order) => order.id === id)?.invoice) return
     if (!confirm('این سفارش حذف شود؟')) return
 
     setError('')
@@ -156,9 +160,9 @@ export default function AdminOrdersPage() {
                     <td className="px-6 py-4">
                       <button
                         onClick={() => handleDelete(order.id)}
-                        disabled={busyIds.includes(order.id) || order.verified || ['SHIPPED', 'DELIVERED'].includes(order.status)}
+                        disabled={busyIds.includes(order.id) || !!order.invoice || order.verified || ['SHIPPED', 'DELIVERED'].includes(order.status)}
                         className="p-2 hover:bg-fog rounded-2xl transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                        title={order.verified || ['SHIPPED', 'DELIVERED'].includes(order.status) ? 'سابقهٔ سفارش پرداخت‌شده یا ارسال‌شده حفظ می‌شود' : 'حذف'}
+                        title={order.invoice ? 'سفارش دارای فاکتور برای حفظ سابقه حذف نمی‌شود' : order.verified || ['SHIPPED', 'DELIVERED'].includes(order.status) ? 'سابقهٔ سفارش پرداخت‌شده یا ارسال‌شده حفظ می‌شود' : 'حذف'}
                         aria-label={`حذف سفارش ${order.id.slice(-6)}`}
                       >
                         <Trash2 className="w-5 h-5 text-red-600" />
@@ -172,7 +176,7 @@ export default function AdminOrdersPage() {
                           {order.items.map((item) => (
                             <div key={item.id} className="flex justify-between">
                               <span>
-                                {item.product.name} — سایز {item.size} — رنگ {item.color} × {item.quantity}
+                                {item.productName || item.product.name} — سایز {item.size} — رنگ {item.color} × {item.quantity}
                               </span>
                               <span>{formatPrice(item.price * item.quantity)} تومان</span>
                             </div>
@@ -185,6 +189,7 @@ export default function AdminOrdersPage() {
                           <div className="border-t border-line pt-2 flex justify-between text-mist">
                             <span>گیرنده: {order.recipientName || order.user.name} | آدرس: {order.address} | تلفن: {order.phone}</span>
                           </div>
+                          <InvoiceDownload orderId={order.id} status={order.status} invoice={order.invoice} />
                         </div>
                       </td>
                     </tr>

@@ -393,6 +393,7 @@ export default function CheckoutPage() {
                     id="checkout-address"
                     autoComplete="street-address"
                     required
+                    maxLength={3000}
                     className="input-field"
                     placeholder="شهر، خیابان، پلاک، کدپستی"
                     rows={3}
@@ -408,6 +409,7 @@ export default function CheckoutPage() {
                     autoComplete="tel"
                     type="tel"
                     required
+                    maxLength={50}
                     dir="ltr"
                     className="input-field"
                     placeholder="0912 345 6789"

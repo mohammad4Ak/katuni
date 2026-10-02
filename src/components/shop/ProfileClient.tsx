@@ -18,6 +18,8 @@ import {
 import { signOutWithSessionLock as signOut } from '@/lib/session-actions'
 import Link from 'next/link'
 import { formatPrice } from '@/lib/utils'
+import type { InvoiceMetadata } from '@/lib/invoice'
+import InvoiceDownload from './InvoiceDownload'
 import styles from './account.module.css'
 
 interface SessionUser {
@@ -40,6 +42,7 @@ interface OrderItem {
   size: number
   color: string
   price: number
+  productName?: string | null
   product: { name: string }
 }
 
@@ -54,6 +57,7 @@ interface Order {
   address: string
   phone: string
   createdAt: string
+  invoice?: InvoiceMetadata | null
   items: OrderItem[]
 }
 
@@ -72,8 +76,13 @@ export default function ProfileClient({ user }: { user: SessionUser }) {
 
   // حساب من
   const [accForm, setAccForm] = useState({ name: user.name, phone: '' })
+  const [accLoading, setAccLoading] = useState(true)
+  const [accLoadError, setAccLoadError] = useState('')
   const [accSaving, setAccSaving] = useState(false)
   const [accMsg, setAccMsg] = useState('')
+  const accountRequest = useRef<AbortController | null>(null)
+  const accountReady = useRef(false)
+  const accountSavePending = useRef(false)
 
   // تغییر رمز عبور
   const [pwForm, setPwForm] = useState({ current: '', next: '', confirm: '' })
@@ -150,21 +159,52 @@ export default function ProfileClient({ user }: { user: SessionUser }) {
     .catch(() => setOrdersError('سفارش‌ها بارگذاری نشدند. دوباره تلاش کن.'))
     .finally(() => setOrdersLoading(false)), [])
 
+  const loadAccount = useCallback(() => {
+    if (accountRequest.current || accountSavePending.current) return
+    const controller = new AbortController()
+    accountRequest.current = controller
+    accountReady.current = false
+    return fetch('/api/profile', { cache: 'no-store', signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error('Profile request failed')
+        return response.json()
+      })
+      .then((data) => {
+        if (typeof data?.name !== 'string' || (data.phone !== null && typeof data.phone !== 'string')) {
+          throw new Error('Invalid profile response')
+        }
+        if (controller.signal.aborted) return
+        setAccForm({ name: data.name, phone: data.phone ?? '' })
+        accountReady.current = true
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setAccLoadError('اطلاعات حساب بارگذاری نشد. دوباره تلاش کن.')
+      })
+      .finally(() => {
+        if (accountRequest.current === controller) accountRequest.current = null
+        if (!controller.signal.aborted) setAccLoading(false)
+      })
+  }, [])
+
   useEffect(() => {
     loadAddresses()
     loadOrders()
-    // پر کردن تلفن از اولین آدرس یا رکورد کاربر
-    fetch('/api/profile')
-      .then(async (r) => (r.ok ? r.json() : null))
-      .then((u) => {
-        if (u?.phone) setAccForm((f) => ({ ...f, phone: u.phone }))
-      })
-      .catch(() => {})
   }, [loadAddresses, loadOrders])
+
+  useEffect(() => {
+    void loadAccount()
+    return () => {
+      accountRequest.current?.abort()
+      accountRequest.current = null
+      accountReady.current = false
+    }
+  }, [loadAccount])
 
   /* ---------- Account ---------- */
   const handleAccountSave = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!accountReady.current || accountSavePending.current) return
+    accountSavePending.current = true
     setAccSaving(true)
     setAccMsg('')
     try {
@@ -183,6 +223,7 @@ export default function ProfileClient({ user }: { user: SessionUser }) {
     } catch {
       setAccMsg('خطای ارتباط با سرور')
     } finally {
+      accountSavePending.current = false
       setAccSaving(false)
     }
   }
@@ -372,7 +413,7 @@ export default function ProfileClient({ user }: { user: SessionUser }) {
                       {order.items.map((item) => (
                         <div key={item.id} className="flex flex-wrap gap-2 justify-between text-sm py-2">
                           <span className="text-night">
-                            {item.product.name} — سایز {item.size} × {item.quantity}
+                            {item.productName || item.product.name} — سایز {item.size} × {item.quantity}
                           </span>
                           <span className="text-mist">{formatPrice(item.price * item.quantity)}</span>
                         </div>
@@ -386,6 +427,7 @@ export default function ProfileClient({ user }: { user: SessionUser }) {
                       <p className="text-xs text-mist pt-2 border-t border-line/60">
                         {order.recipientName && <>گیرنده: {order.recipientName}<br /></>}ارسال به: {order.address}
                       </p>
+                      <InvoiceDownload orderId={order.id} status={order.status} invoice={order.invoice} />
                     </div>
                   )}
                 </div>
@@ -466,8 +508,16 @@ export default function ProfileClient({ user }: { user: SessionUser }) {
         {tab === 'account' && (
           <div className={styles.accountForms}>
             <div className={styles.sectionTop}><div><h2>حساب کاربری</h2><p>اطلاعاتت رو به‌روز نگه دار و امنیت حسابت رو مدیریت کن.</p></div></div>
-            <form onSubmit={handleAccountSave} className="card p-6 space-y-5">
+            <form onSubmit={handleAccountSave} className="card p-6 space-y-5" aria-busy={accLoading || accSaving}>
               <h3 className="font-bold text-lg">اطلاعات حساب</h3>
+
+              {accLoading && <p role="status" className="text-sm text-mist">در حال بارگذاری اطلاعات حساب…</p>}
+              {accLoadError && (
+                <div role="alert" className="space-y-3 text-sm text-red-700">
+                  <p>{accLoadError}</p>
+                  <button type="button" onClick={() => { setAccLoading(true); setAccLoadError(''); void loadAccount() }} className={styles.pillLink}>تلاش دوباره</button>
+                </div>
+              )}
 
               <div>
                 <label htmlFor="account-email" className="block font-bold mb-2">ایمیل</label>
@@ -481,6 +531,7 @@ export default function ProfileClient({ user }: { user: SessionUser }) {
                   id="account-name"
                   autoComplete="name"
                   required
+                  disabled={accLoading || !!accLoadError || accSaving}
                   className="input-field"
                   value={accForm.name}
                   onChange={(e) => setAccForm({ ...accForm, name: e.target.value })}
@@ -493,6 +544,7 @@ export default function ProfileClient({ user }: { user: SessionUser }) {
                   id="account-phone"
                   autoComplete="tel"
                   type="tel"
+                  disabled={accLoading || !!accLoadError || accSaving}
                   dir="ltr"
                   className="input-field"
                   placeholder="09123456789"
@@ -511,7 +563,7 @@ export default function ProfileClient({ user }: { user: SessionUser }) {
                 </div>
               )}
 
-              <button type="submit" disabled={accSaving} className="btn-primary disabled:opacity-50">
+              <button type="submit" disabled={accLoading || !!accLoadError || accSaving} className="btn-primary disabled:opacity-50">
                 {accSaving ? 'در حال ذخیره...' : 'ذخیره تغییرات'}
               </button>
             </form>
